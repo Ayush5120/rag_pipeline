@@ -1,0 +1,101 @@
+# Place at: docqa/docker-compose.yml
+
+version: "3.9"
+
+services:
+
+  db:
+    image: pgvector/pgvector:pg16
+    # NOT the standard postgres:16 image. This one ships with the
+    # vector extension already compiled. Standard Postgres doesn't
+    # have it — you'd need to compile from source (20+ extra steps).
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # ${} syntax reads values from your .env file automatically.
+      # The pgvector image reads these on first startup to create
+      # the database and user.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Containers are ephemeral — stop them and data is gone.
+      # This named volume stores Postgres data on your real disk.
+      # Your database now survives 'docker compose down'.
+    ports:
+      - "5432:5432"
+      # Exposes Postgres to your host machine so you can connect
+      # via DBeaver or pgAdmin for inspection during dev.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      # Postgres takes 2-3 seconds to be ready after the container
+      # starts. Without healthcheck, Django connects immediately,
+      # gets 'connection refused', and crashes. This polls every 5s
+      # and only marks db 'healthy' when Postgres accepts queries.
+
+  redis:
+    image: redis:7-alpine
+    # Alpine = tiny Linux variant. Redis image is only ~30MB.
+    # Redis is the message broker between Django and Celery.
+    # Django pushes a task message → Redis holds it → Celery picks it up.
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build: .
+    # 'build: .' means build an image using the Dockerfile in the
+    # current directory. This is how web gets YOUR custom code.
+    # db and redis use pre-built images; web and celery use yours.
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+      - ./media:/media
+      # Mount your local project folder into /app inside container.
+      # Local file = container file. Edit in VS Code → Django sees
+      # it instantly. No rebuild needed during development.
+      # REMOVE THIS in production — rely on COPY . . from Dockerfile.
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+      # Reads your .env file and injects all variables as environment
+      # variables inside the container. Django reads them via os.getenv().
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+        # 'service_healthy' not 'service_started'. Started = container
+        # is running. Healthy = Postgres is actually accepting queries.
+        # This gap is what causes 99% of "connection refused" errors.
+
+  celery:
+    build: .
+    # Same Dockerfile as web — same image, same packages, same code.
+    command: celery -A docqa worker --loglevel=info
+    # Different startup command. Instead of Django, runs the Celery
+    # worker process that picks jobs off the Redis queue.
+    # This is why embedding is async — it runs here, not in the
+    # web container, so the user's HTTP request returns instantly.
+    volumes:
+      - .:/app
+      - ./media:/media
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  # Declares the named volume at the top level so Docker creates
+  # and manages it. Every service that uses it references it by name.

@@ -1,0 +1,15 @@
+Django is a high-level Python web framework that encourages rapid development.
+It follows the Model-Template-View architectural pattern.
+Django includes an ORM that lets you interact with databases using Python code.
+
+pgvector is a PostgreSQL extension that adds vector similarity search.
+It allows storing and querying high-dimensional vectors directly in PostgreSQL.
+This is useful for semantic search and RAG applications.
+
+RAG stands for Retrieval Augmented Generation.
+It works by retrieving relevant document chunks and passing them to an LLM.
+The LLM generates an answer based on the retrieved context.
+
+Celery is a distributed task queue for Python.
+It handles background jobs like sending emails or processing files.
+In our project Celery handles the chunking and embedding pipeline.
