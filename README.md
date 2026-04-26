@@ -38,7 +38,7 @@ cat > ~/projects/rag_pipeline/README.md << 'EOF'
 
 ---
 
-## 🏗 Architecture
+<!-- ## 🏗 Architecture
 ┌─────────────────────────────────────────────────────────────────┐
 │                        INGESTION PIPELINE                        │
 │                                                                   │
@@ -107,7 +107,7 @@ rag_pipeline/
 └── services/
 ├── chunker.py              # LangChain text splitter
 ├── embedder.py             # HuggingFace embeddings
-└── pipeline.py            # orchestrates chunk→embed→store
+└── pipeline.py            # orchestrates chunk→embed→store -->
 
 ## 🚀 Quick Start
 
