@@ -1,6 +1,5 @@
 ---
 
-cat > ~/projects/rag_pipeline/README.md << 'EOF'
 <div align="center">
 
 # 🔍 Document Q&A System
