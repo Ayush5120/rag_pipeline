@@ -19,7 +19,7 @@
 
 <br/>
 
-[Features](#-features) · [Architecture](#-architecture) · [Quick Start](#-quick-start) · [API](#-api-reference) · [Commands](#-useful-commands)
+[Features](#-features) · [Quick Start](#-quick-start) · [API](#-api-reference) · [Commands](#-useful-commands)
 
 </div>
 
