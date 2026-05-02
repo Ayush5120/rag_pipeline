@@ -143,6 +143,9 @@ POSTGRES_PASSWORD=your-db-password
 REDIS_URL=redis://redis:6379/0
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
+GEMINI_API_KEY=your-api-key
+
+GROQ_API_KEY=your-api-key
 ```
 
 ### 3. Create media directory
