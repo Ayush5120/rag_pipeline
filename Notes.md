@@ -6,7 +6,7 @@
 
 ## 📋 Table of Contents
 
-1. [What You Built](#what-you-built)
+1. [What You Built](#-what-you-built)
 2. [Project Structure](#project-structure)
 3. [Docker and Containerization](#docker-and-containerization)
 4. [Django Architecture](#django-architecture)
