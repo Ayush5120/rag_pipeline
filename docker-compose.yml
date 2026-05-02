@@ -46,14 +46,14 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 5 
 
   web:
     build: .
     # 'build: .' means build an image using the Dockerfile in the
     # current directory. This is how web gets YOUR custom code.
     # db and redis use pre-built images; web and celery use yours.
-    command: python manage.py runserver 0.0.0.0:8000
+    command: watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python manage.py runserver 0.0.0.0:8000 --noreload
     volumes:
       - .:/app
       - ./media:/media
@@ -79,7 +79,7 @@ services:
   celery:
     build: .
     # Same Dockerfile as web — same image, same packages, same code.
-    command: celery -A docqa worker --loglevel=info
+    command: watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- celery -A docqa worker --loglevel=info
     # Different startup command. Instead of Django, runs the Celery
     # worker process that picks jobs off the Redis queue.
     # This is why embedding is async — it runs here, not in the

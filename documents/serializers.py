@@ -4,6 +4,9 @@ from rest_framework import serializers
 from .models import Document, DocumentChunk, QueryLog
 
 
+ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/plain']
+MAX_FILE_SIZE_MB = 10
+
 class DocumentSerializer(serializers.ModelSerializer):
     chunk_count = serializers.SerializerMethodField()
     # SerializerMethodField = a computed field not on the model.
@@ -35,3 +38,29 @@ class QueryLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = QueryLog
         fields = ['id', 'query', 'answer', 'latency_ms', 'ragas_score', 'created_at']
+
+class DocumentUploadSerializer(serializers.Serializer):
+    file = serializers.FileField(required=False)
+    text = serializers.CharField(required=False, allow_blank=False, max_length=500_000)
+    title = serializers.CharField(max_length=255)
+
+    def validate(self, data):
+        if not data.get('file') and not data.get('text'):
+            raise serializers.ValidationError(
+                "Provide either a 'file' or 'text' field."
+            )
+        return data
+
+    def validate_file(self, file):
+        max_size = 10 * 1024 * 1024
+        if file.size > max_size:
+            raise serializers.ValidationError(
+                f"File size {file.size / 1024 / 1024:.1f}MB exceeds 10MB limit."
+            )
+        allowed = ['application/pdf', 'text/plain']
+        if file.content_type not in allowed:
+            raise serializers.ValidationError(
+                f"Only PDF or plain text allowed."
+            )
+        return file
+

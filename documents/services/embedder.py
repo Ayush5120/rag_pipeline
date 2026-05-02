@@ -1,5 +1,3 @@
-# Place at: docqa/documents/services/embedder.py
-
 from sentence_transformers import SentenceTransformer
 
 _model = None

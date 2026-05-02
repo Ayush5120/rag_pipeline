@@ -2,7 +2,7 @@
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import DocumentViewSet
+from .views import DocumentViewSet, QueryView
 
 router = DefaultRouter()
 router.register(r'documents', DocumentViewSet)
@@ -15,4 +15,7 @@ router.register(r'documents', DocumentViewSet)
 # GET    /api/documents/{id}/chunks/      ← your @action
 # POST   /api/documents/{id}/reprocess/  ← your @action
 
-urlpatterns = [path('', include(router.urls))]
+urlpatterns = [
+    path('', include(router.urls)),
+    path('query/', QueryView.as_view()),
+    ]
