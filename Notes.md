@@ -1,527 +1,928 @@
-# Week 1 — Deep Notes: Chunking, Embeddings & the RAG Foundation
+You built a production-grade Document Q&A system from scratch.
+A user uploads any document. The system reads it, breaks it into pieces,
+converts each piece into numbers that capture meaning, and stores everything
+in a database. When a user asks a question, the system finds the most
+relevant pieces and passes them to an LLM which generates a precise answer.
+
+This is called RAG — Retrieval Augmented Generation.
+It is the same architecture used inside Notion AI, GitHub Copilot Chat,
+Cursor, Perplexity, and every major enterprise AI product today.
+
+The full pipeline you built:
+INGESTION (happens once when document is uploaded)
+
+![Full Pipeline Diagram](images/Rag_deatiled.png)
 
 ---
 
-## What You Built This Week
+## Part 1 — Project Structure Explained
+![rag_pipeline_directory_structure](images/rag_directory_structure.png)
 
-You built the **memory system** for an AI Q&A application.
-
-Think of it like this. Imagine you hire a very smart assistant (the LLM) but
-this assistant has one problem — they can only read about 10 pages at a time.
-You give them a 500-page book and ask a question. They cannot read all 500 pages.
-
-So you build a system that:
-1. Reads the entire book once upfront
-2. Breaks it into small notes (chunks)
-3. Tags each note with a "topic fingerprint" (embedding/vector)
-4. When a question comes in — finds the 5 most relevant notes instantly
-5. Hands those 5 notes to the assistant
-6. Assistant reads just those 5 pages and answers perfectly
-
-That is RAG. That is what you built the foundation of this week.
+Why the services/ folder exists:
+Services contain pure business logic with no Django or HTTP knowledge.
+pipeline.py does not know about HTTP requests.
+chunker.py does not know about the database.
+Each file has one job. This is called Single Responsibility Principle.
+You can test each service in isolation without spinning up a web server.
+You can swap chunker.py for a different strategy without touching views.py.
 
 ---
 
-## Part 1 — Chunking (The Art of Splitting Text)
+## Part 2 — Docker and Containerization
 
-### What is chunking?
+### What Docker actually does
 
-Chunking is breaking a large document into smaller pieces so that:
-- Each piece fits inside an LLM's context window
-- Each piece is small enough to be "about one thing"
-- Retrieved chunks are precise — not entire chapters
+Without Docker:
+- You install Python 3.11 on your machine
+- You install PostgreSQL on your machine
+- You install Redis on your machine
+- Your teammate installs Python 3.10 — subtle bugs appear
+- You deploy to a server running Ubuntu 20 — different behavior again
 
-### What you used: RecursiveCharacterTextSplitter
+With Docker:
+- Everything runs in isolated containers
+- Every container has exactly the same environment
+- Your machine, your teammate's machine, and the production server
+  all run identical environments
+- "Works on my machine" becomes "works everywhere"
+
+### Your 4 containers
+![docker_container](images/docker_flow.png)
+
+web — runs Django development server. Handles HTTP requests.
+db — runs PostgreSQL with pgvector extension. Stores all data.
+redis — message broker. web pushes tasks here. celery reads from here.
+celery — runs the background worker. Processes document ingestion.
+
+WHY 4 separate containers?
+Because they have different jobs, different scaling needs, and different
+failure modes. If the celery worker crashes, Django still serves requests.
+If you need more processing power, you run 5 celery workers, not 5 Django
+servers. Separation of concerns at the infrastructure level.
+
+### The Dockerfile explained line by line
+
+```dockerfile
+FROM python:3.11-slim
+```
+Start from an official Python 3.11 image on minimal Debian Linux.
+slim = 50MB instead of 900MB. We don't need the full OS.
+
+```dockerfile
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+```
+First: stop Python writing .pyc cache files — useless in containers.
+Second: force Python to flush logs immediately so docker logs shows output.
+Without this, logs get buffered and you see nothing while debugging.
+
+```dockerfile
+WORKDIR /app
+```
+All commands run from /app. Your project files live at /app/manage.py,
+/app/docqa/settings.py etc.
+
+```dockerfile
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+```
+DELIBERATE ORDER. Docker caches each line as a layer.
+If you copy code first, every code change rebuilds pip install (slow).
+By copying requirements.txt first, pip only reruns when dependencies change.
+Code changes only hit the fast final COPY layer.
+This saves 2-3 minutes on every rebuild.
+
+### The volume mount that enables live reload
+
+```yaml
+volumes:
+  - .:/app
+```
+This mounts your local project folder into /app inside the container.
+They are the SAME folder — not a copy.
+Edit a file in VS Code → Django sees the change instantly.
+This is why you don't need docker compose up after every code change.
+
+### The healthcheck that prevents race conditions
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U docqa_user -d docqa_db"]
+  interval: 5s
+  retries: 5
+```
+PostgreSQL takes 3-5 seconds to start accepting connections after the
+container starts. Without healthcheck, Django starts immediately, tries
+to connect to Postgres, gets "connection refused", and crashes.
+The healthcheck polls every 5 seconds and only marks db as "healthy"
+when Postgres actually accepts connections.
+depends_on: condition: service_healthy makes Django wait.
+
+---
+
+## Part 3 — Django Architecture
+
+### Why Django over Flask
+
+Flask is a microframework — you build everything yourself.
+Django is a batteries-included framework — everything is built in.
+
+For a production API you need: ORM, migrations, admin panel, auth,
+serializers, validation, pagination, CORS, security middleware.
+Flask requires a separate library for each. Django includes all of them.
+
+For a RAG system with multiple models, async tasks, and an admin UI —
+Django is the right choice.
+
+### The request lifecycle
+![request_lifecycle](images/rag_request_lifecycle.png)
+
+### Models — the database schema
 
 ```python
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=512,
-    chunk_overlap=64,
-    separators=["\n\n", "\n", ". ", " ", ""],
+class Document(models.Model):
+    title = models.CharField(max_length=255)
+    file = models.FileField(upload_to='documents/')
+    status = models.CharField(choices=STATUS_CHOICES, default='pending')
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+One row per uploaded file. status tracks pipeline progress.
+pending → processing → done (or failed).
+The API can always tell the user what stage their document is at.
+
+```python
+class DocumentChunk(models.Model):
+    document = models.ForeignKey(Document, on_delete=models.CASCADE)
+    chunk_index = models.IntegerField()
+    content = models.TextField()
+    embedding = VectorField(dimensions=384)
+    metadata = models.JSONField(default=dict)
+```
+This is the core RAG table. One row per chunk.
+embedding is a 384-float vector stored natively in PostgreSQL.
+When a user asks a question, their question is also converted to 384 floats,
+and pgvector finds the rows with the most similar embedding vectors.
+That's the entire retrieval mechanism — one SQL query.
+
+```python
+class QueryLog(models.Model):
+    query = models.TextField()
+    answer = models.TextField(blank=True)
+    retrieved_chunk_ids = models.JSONField(default=list)
+    latency_ms = models.IntegerField(default=0)
+    ragas_score = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+Records every question, every answer, which chunks were used, how long
+it took, and a quality score. This is your evaluation dataset.
+Without QueryLog you can never answer "is the system getting better?".
+
+### Why ViewSet over APIView
+
+```python
+class DocumentViewSet(viewsets.ModelViewSet):
+    queryset = Document.objects.all().order_by('-created_at')
+    serializer_class = DocumentSerializer
+```
+These 3 lines generate 5 endpoints automatically:
+GET    /api/documents/        → list all
+POST   /api/documents/        → create new
+GET    /api/documents/{id}/   → get one
+PUT    /api/documents/{id}/   → update
+DELETE /api/documents/{id}/   → delete
+
+ModelViewSet uses the DRY principle — Don't Repeat Yourself.
+The alternative is writing each endpoint manually — 50+ lines per resource.
+
+### Why Serializers
+
+DRF Serializers do 3 things:
+1. Validate incoming data (is title missing? is file too large?)
+2. Convert model instances to JSON for responses
+3. Handle computed fields like chunk_count that don't exist on the model
+
+Without serializers you write this validation logic in every view.
+With serializers you write it once and reuse it everywhere.
+
+---
+
+## Part 4 — Async Processing with Celery
+
+### The problem Celery solves
+
+Generating embeddings for a 50-page PDF takes 30-60 seconds.
+If you do this inside the HTTP request, the user waits 60 seconds
+staring at a loading spinner. The browser might timeout.
+Your API appears broken.
+
+The solution: return immediately, process in the background.
+
+![celery_solves](images/rag_celery.png)
+
+### How Celery actually works
+
+.delay() is the key. It does NOT run the function.
+It serializes the function name and arguments as JSON, pushes to Redis,
+and returns immediately. Celery worker on the other side reads from Redis
+and actually executes the function.
+
+### Why max_retries=3 with countdown=10
+
+```python
+@shared_task(bind=True, max_retries=3)
+def process_document_task(self, document_id: int):
+    try:
+        _process(document_id)
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=10)
+```
+
+Production reality: databases go down momentarily. Networks blip.
+The embedding model might timeout once. These are transient failures.
+With retries: task fails → wait 10 seconds → try again → usually succeeds.
+Without retries: one network blip = document permanently stuck as "failed".
+Users have to manually reprocess. Bad UX.
+
+### transaction.atomic() — the safety guarantee
+
+```python
+with transaction.atomic():
+    doc = Document.objects.create(...)
+    chunks = chunk_document(text)
+    embeddings = embed_texts(texts)  # if this fails...
+    DocumentChunk.objects.bulk_create(...)  # this never runs
+```
+
+atomic() means: ALL operations succeed, or NONE of them do.
+If embed_texts() raises an exception, the Document row is rolled back.
+The database is always in a consistent state.
+Without atomic(): embed fails → Document exists with no chunks → orphan data.
+This is the banking principle: transfer money = debit AND credit.
+If credit fails, debit must roll back.
+
+---
+
+## Part 5 — Chunking In Depth
+
+### Why chunking is necessary
+
+LLMs have a context window — a maximum number of tokens they can read
+at once. GPT-4: 128K tokens. Llama 3.1: 8K tokens.
+A 100-page PDF is ~50,000 words = ~65,000 tokens.
+It doesn't fit. You must retrieve only the relevant parts.
+
+Chunking splits the document into pieces small enough to fit in context.
+RAG then selects only the relevant pieces for each query.
+
+### RecursiveCharacterTextSplitter settings
+
+```python
+chunk_size=512        # max characters per chunk
+chunk_overlap=64      # characters shared between adjacent chunks
+separators=["\n\n", "\n", ". ", " ", ""]
+```
+
+chunk_size=512: roughly 80-100 words. Large enough to contain a complete
+thought. Small enough to be precise when retrieved.
+Too small (50 chars): chunks lack context, retrieval is noisy.
+Too large (2000 chars): chunks contain multiple topics, retrieval imprecise.
+
+chunk_overlap=64: prevents information loss at boundaries.
+Without overlap:
+  Chunk 1: "Django ORM supports multiple databases."
+  Chunk 2: "PostgreSQL, MySQL, and SQLite are supported."
+  Question "what databases does Django ORM support?" → chunk 2 retrieved
+  but chunk 2 doesn't mention "Django ORM" — context is lost.
+With overlap:
+  Chunk 2 starts 64 chars before its boundary so it includes "ORM supports"
+  Context preserved.
+
+separators tries each in order:
+  \n\n → paragraph boundary (most natural — try this first)
+  \n   → line break
+  .    → sentence end
+  " "  → word boundary
+  ""   → character (never split mid-word if avoidable)
+
+Result: chunks always end at natural language boundaries.
+
+### What gets stored per chunk
+DocumentChunk row:
+chunk_index: 3
+content: "pgvector adds vector similarity search to PostgreSQL.
+It stores vectors as native column types and provides
+operators for distance calculation."
+embedding: [0.12, -0.45, 0.89, 0.23, -0.11, ...]  ← 384 floats
+metadata: {
+"embedding_model": "all-MiniLM-L6-v2",
+"char_count": 187
+}
+
+The metadata.embedding_model field is critical.
+If you later upgrade from all-MiniLM-L6-v2 to a better model,
+old chunks were embedded with the old model.
+Comparing old 384-dim vectors with new 384-dim vectors from a different
+model gives garbage similarity scores — the numbers mean different things.
+Storing the model name lets you detect stale embeddings and re-process.
+
+---
+
+## Part 6 — Embeddings In Depth
+
+### What an embedding actually is
+
+An embedding is a point in high-dimensional space.
+384 dimensions means a point in 384-dimensional space.
+Each dimension captures some aspect of meaning.
+
+You can't visualize 384 dimensions but imagine 3D for intuition:
+  "cat"    → point at (0.2, 0.8, 0.1)
+  "dog"    → point at (0.3, 0.7, 0.2)  ← close to cat
+  "table"  → point at (0.9, 0.1, 0.8)  ← far from cat
+
+Similar meanings → nearby points.
+Different meanings → distant points.
+
+In 384 dimensions, the model can encode much more nuanced relationships
+than this 3D example. Synonyms, antonyms, topics, tone, domain — all
+encoded in the relative positions of these 384-dimensional points.
+
+### The all-MiniLM-L6-v2 model
+
+Architecture: 6-layer transformer (BERT-style)
+Training: Contrastive learning on 1 billion sentence pairs
+Task trained for: Given sentence A and sentence B, their embeddings
+should be close if they mean the same thing, far if they don't.
+Output: 384-float normalized vector (magnitude = 1.0)
+Size: ~90MB
+Speed: ~500 chunks/second on CPU
+Quality: Excellent for English semantic similarity
+
+L6 means 6 transformer layers. More layers = more capacity to learn
+subtle relationships but slower inference. L6 is the production sweet spot.
+
+The model is loaded ONCE when the Celery worker starts — singleton pattern:
+
+```python
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer('all-MiniLM-L6-v2')
+        # First call: 90MB download + 3-5 second load
+        # Every subsequent call: instant, reuses loaded model
+    return _model
+```
+
+Without singleton: model reloads on every function call.
+200 chunks = 200 × 5 second loads = 1000 seconds.
+With singleton: model loads once = 5 seconds total regardless of chunk count.
+
+### Why we use batch encoding
+
+```python
+embeddings = model.encode(
+    texts,          # all chunks at once
+    batch_size=32,  # process 32 at a time
 )
 ```
 
-### Understanding chunk_size=512
+Instead of: for text in texts: embed(text)  ← 200 separate calls
+We do: embed(all_texts)  ← 1 batched call
 
-This means each chunk is at most 512 characters long.
+The transformer model is highly optimized for batched inference.
+Processing 32 texts simultaneously takes roughly the same time as
+processing 1 text. Batching gives near-linear throughput improvement.
 
-Example — imagine this paragraph (125 chars):
-Django is a Python framework. It has an ORM. The ORM lets you write
-database queries in Python instead of SQL. This saves a lot of time.
+### Cosine similarity vs other distance metrics
 
-With chunk_size=512 this fits in one chunk.
-With chunk_size=50 it would be split into multiple chunks.
+Three common distance metrics for vectors:
 
-512 characters is roughly 80-100 words — about the size of a short paragraph.
-That is enough context to answer a specific question but small enough to
-be precise.
+L2 (Euclidean): measures straight-line distance between points.
+  Cares about magnitude (how long the vectors are).
+  Problem: "car" and "CAR" might have different magnitudes.
 
-### Understanding chunk_overlap=64
+Dot product: measures alignment considering magnitude.
+  Fast but biased toward longer vectors.
 
-Imagine your document has this text split across a boundary:
-...Django's ORM is very powerful. It supports | PostgreSQL, MySQL, and SQLite.
-↑
-chunk boundary
+Cosine: measures the angle between vectors, ignores magnitude.
+  "car" and "CAR" have the same angle → same similarity.
+  Best for text where we care about direction (meaning) not magnitude (length).
 
-Without overlap — chunk 1 ends at "powerful." and chunk 2 starts at
-"PostgreSQL". If someone asks "what databases does Django support?" —
-the answer is in chunk 2 but the context "Django's ORM" is in chunk 1.
-The answer seems disconnected.
+all-MiniLM-L6-v2 outputs normalized vectors (magnitude = 1.0).
+For normalized vectors, cosine and dot product give identical rankings.
+We use cosine explicitly for clarity when we switch to unnormalized models.
 
-With overlap=64 — chunk 2 starts 64 characters BEFORE its boundary.
-So chunk 2 includes "...It supports PostgreSQL, MySQL, and SQLite."
-Full context preserved.
-Chunk 1: "...Django's ORM is very powerful. It supports"
-Chunk 2: "It supports PostgreSQL, MySQL, and SQLite..."
-↑
-64 chars overlap
+Cosine distance = 1 - cosine similarity
+  distance 0.0 = identical meaning
+  distance 0.5 = somewhat related
+  distance 1.0 = completely unrelated
+  distance > 1.0 = opposite meaning
 
-### Understanding separators=["\n\n", "\n", ". ", " ", ""]
-
-This is the priority order for WHERE to cut. The splitter tries each
-separator in order:
-"\n\n"  →  paragraph break (best cut point — most natural)
-"\n"    →  line break
-". "    →  sentence end
-" "     →  word boundary
-""      →  character (last resort — never ideal)
-
-So if your chunk_size says "cut here" but it falls in the middle of a word,
-the splitter looks backwards for the nearest sentence end, then line break,
-then paragraph break. Result: chunks always end at natural boundaries.
-
-This is why it is called RECURSIVE — it recursively tries each separator.
-
-### What you got in the database
-
-For your test.txt with 4 paragraphs you got roughly 3-4 chunks like:
-Chunk 0: "Django is a high-level Python web framework that encourages
-rapid development. It follows the Model-Template-View
-architectural pattern. Django includes an ORM..."
-Chunk 1: "pgvector is a PostgreSQL extension that adds vector similarity
-search. It allows storing and querying high-dimensional
-vectors directly in PostgreSQL..."
-Chunk 2: "RAG stands for Retrieval Augmented Generation. It works by
-retrieving relevant document chunks and passing them to
-an LLM. The LLM generates an answer..."
-Chunk 3: "Celery is a distributed task queue for Python. It handles
-background jobs like sending emails or processing files..."
-
-Each chunk is self-contained enough to answer a specific question.
+Your search filter: distance__lt=0.7 means "only return chunks with
+cosine distance less than 0.7" = similarity greater than 0.3.
+Chunks with distance > 0.7 are probably irrelevant noise.
 
 ---
 
-## Part 2 — Embeddings (Teaching Machines to Understand Meaning)
+## Part 7 — pgvector and Vector Search
 
-### The core problem embeddings solve
+### Why PostgreSQL instead of a dedicated vector database
 
-Computers cannot understand meaning. They only understand numbers.
+Dedicated vector databases (Pinecone, Qdrant, Weaviate):
+  + Optimized purely for vector search
+  + Sub-10ms queries at billion-vector scale
+  + Managed infrastructure, no ops work
+  - Separate service to manage and pay for
+  - No SQL — can't join with your relational data
+  - Complex to filter by user_id, date, document_id
 
-"Dog" and "puppy" — a computer sees two different strings. No connection.
-A human knows they are related.
+pgvector in PostgreSQL:
+  + Single database for all your data — vectors + relational
+  + Full SQL power: WHERE document_id=1 AND distance < 0.7
+  + You already have PostgreSQL — no new service
+  + Scales comfortably to 5 million+ vectors
+  - Not as fast as specialized DBs at extreme scale
+  - You manage the infrastructure
 
-Embeddings solve this by converting text to numbers in a special way —
-where similar meanings get similar numbers.
+For your project (and most real-world RAG projects):
+pgvector is the right choice. Most startups building RAG don't have
+a billion vectors. They have millions. pgvector handles that easily.
 
-### What is a vector?
+### How the IVFFlat index works
 
-A vector is just a list of numbers. For example:
-"Django is a framework"  →  [0.12, -0.45, 0.89, 0.23, -0.67, ...]
-384 numbers total
+Without index — brute force scan:
+  Query arrives → compare against every single row → return closest 5
+  10,000 chunks = 10,000 comparisons
+  1,000,000 chunks = 1,000,000 comparisons
+  Linear time: O(n). Gets slower as you add data.
 
-384 numbers — that is what all-MiniLM-L6-v2 produces for any text,
-whether it is 3 words or 300 words. Always exactly 384 numbers.
+With IVFFlat index (Inverted File Flat):
+  During index creation: cluster all vectors into 100 groups using k-means
+  During search: find the 1-2 closest cluster centroids → search only those clusters
+  1,000,000 chunks → search only ~20,000 (2% of data) → still finds 95%+ of results
+  Much faster: roughly O(√n)
 
-These 384 numbers are NOT random. Each number captures some aspect of
-meaning. The model was trained on billions of sentences so it learned
-which aspects of meaning matter.
+lists=100 parameter: number of clusters.
+  Rule: lists = total_rows / 1000
+  100 lists = optimal for up to 100,000 chunks
+  1000 lists = optimal for up to 1,000,000 chunks
 
-### Why similar texts get similar vectors
-"Django is a Python framework"    →  [0.12, -0.45, 0.89, ...]
-"Flask is a Python web framework" →  [0.11, -0.43, 0.91, ...]
-"I love eating pizza"             →  [0.87,  0.23, -0.34, ...]
+Trade-off: IVFFlat is APPROXIMATE — it might miss the best result 5% of
+the time to be 100x faster. For RAG this is acceptable.
+If you need exact results: use HNSW index (slower build, faster query).
 
-The first two are similar (both about Python frameworks) so their
-vectors are close to each other in 384-dimensional space.
-The third is completely different so its vector is far away.
-
-This is the magic. You never told the model "Django and Flask are similar".
-It learned this from training data.
-
-### The model you used: all-MiniLM-L6-v2
-
-- Made by sentence-transformers (HuggingFace)
-- Outputs 384-dimensional vectors
-- ~90MB model size — runs on CPU, no GPU needed
-- Fast — embeds hundreds of chunks in seconds
-- Free — runs entirely locally, no API calls
-- Good quality for English text
-
-The "L6" means it has 6 transformer layers. More layers = better quality
-but slower. L6 is the sweet spot for production use.
-
-### What cosine similarity means
-
-When you ask a question, we need to find which chunks are most relevant.
-We do this by measuring the "angle" between vectors.
-Question vector:  [0.12, -0.45, 0.89, ...]
-Chunk 1 vector:   [0.11, -0.43, 0.91, ...]  ← very similar, small angle
-Chunk 2 vector:   [0.87,  0.23, -0.34, ...]  ← very different, large angle
-
-Cosine similarity = 1.0 means identical meaning
-Cosine similarity = 0.0 means completely unrelated
-Cosine similarity = -1.0 means opposite meaning
-
-pgvector uses the <=> operator to find the chunks with the smallest
-cosine distance (most similar) to your question. This is the entire
-retrieval mechanism.
-
-### The IVFFlat index you created
-
-```sql
-CREATE INDEX USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-```
-
-Without the index — finding the most similar chunk requires comparing
-your question vector against EVERY chunk in the database one by one.
-1000 chunks = 1000 comparisons. 1 million chunks = 1 million comparisons.
-This is called a brute-force scan. Too slow.
-
-IVFFlat (Inverted File Flat) solves this:
-1. During index creation — clusters all vectors into 100 groups
-2. During search — only searches the closest 1-2 groups, not all 100
-3. Result — searches 1% of the data but finds 95%+ of the right answers
-
-This is called Approximate Nearest Neighbor (ANN) search.
-Slightly less accurate than brute force but 100x faster at scale.
-
----
-
-## Part 3 — What You Built vs What Production AI Uses
-
-### Your stack this week
-You:         all-MiniLM-L6-v2  →  384 dimensions  →  pgvector IVFFlat
-Cost:        Free
-Speed:       Fast on CPU
-Quality:     Good for English
-Scale:       Up to ~1M chunks comfortably
-
-### What Claude, ChatGPT, and production systems use
-
-#### Embeddings
-OpenAI text-embedding-3-large   →  3072 dimensions  →  much richer meaning
-OpenAI text-embedding-3-small   →  1536 dimensions  →  good balance
-Google text-embedding-004       →  768 dimensions
-Cohere embed-v3                 →  1024 dimensions
-
-More dimensions = the model captures more nuanced aspects of meaning.
-Your 384-dim model might confuse "bank" (river) with "bank" (finance).
-A 3072-dim model handles this much better.
-
-The fundamental concept is identical. Just bigger numbers, more nuance.
-
-#### Vector databases
-You used:    pgvector (PostgreSQL extension)
-Production:  Pinecone, Weaviate, Qdrant, Milvus, Chroma
-
-pgvector is excellent for:
-- Teams already using PostgreSQL
-- Up to ~5 million vectors
-- Wanting SQL + vectors in one database
-- Cost-conscious setups
-
-Pinecone/Qdrant are used when:
-- Billions of vectors (entire internet scale)
-- Need managed infrastructure
-- Sub-10ms query latency at massive scale
-- Multi-region replication
-
-Anthropic likely uses custom internal vector infrastructure for Claude.
-OpenAI uses their own embedding + retrieval systems.
-
-The core algorithm (cosine similarity search) is the same everywhere.
-
-#### Chunking strategies
-You used:       RecursiveCharacterTextSplitter (character-based)
-Production:     Semantic chunking — splits at meaning boundaries not char count
-Token-based chunking — splits by tokens not characters
-Hierarchical chunking — keeps parent/child relationships
-Document-structure-aware — respects headings, tables, code blocks
-
-Character-based chunking (what you built) is simple and works well.
-The fancier approaches exist because:
-- A table should not be split mid-row
-- A code block should stay intact
-- A heading and its paragraph should often be one chunk
-
-#### Retrieval approaches
-You built:      Pure vector search (semantic similarity only)
-Production:     Hybrid search = vector search + BM25 keyword search
-Combined with a Reranker model for final ordering
-
-Pure vector search sometimes misses exact keyword matches.
-"What is the error code 404?" — the word "404" has no semantic meaning.
-Keyword search finds "404" exactly. Hybrid search combines both.
-
-This is Week 3 of your curriculum.
-
----
-
-## Part 4 — Other Approaches You Could Have Taken
-
-### Different embedding models
-
-#### Option A — OpenAI embeddings (best quality, costs money)
+### The cosine search query
 
 ```python
-from openai import OpenAI
-client = OpenAI()
+from pgvector.django import CosineDistance
 
-def embed_texts(texts):
-    response = client.embeddings.create(
-        model="text-embedding-3-small",  # 1536-dim
-        input=texts
+chunks = (
+    DocumentChunk.objects
+    .annotate(distance=CosineDistance('embedding', query_embedding))
+    .order_by('distance')
+    .filter(distance__lt=0.7)
+    [:5]
+)
+```
+
+Translates to SQL:
+  SELECT *, (embedding <=> '[0.12,-0.45,...]') AS distance
+  FROM documents_documentchunk
+  WHERE (embedding <=> '[0.12,-0.45,...]') < 0.7
+  ORDER BY distance
+  LIMIT 5;
+
+The <=> operator is pgvector's cosine distance operator.
+The IVFFlat index makes this query fast by only scanning relevant clusters.
+
+---
+
+## Part 8 — The LLM Integration
+
+### Why Groq instead of OpenAI
+
+OpenAI GPT-4o-mini: $0.15/1M tokens, requires paid account
+Groq llama-3.1-8b-instant: Free tier, 14,400 requests/day, very fast
+
+For RAG specifically, the LLM's job is simple:
+Read 5 short paragraphs → synthesize an answer → cite sources.
+This does NOT require frontier model capability.
+Llama 3.1 8B is more than capable for this task.
+
+At production scale, the embedding model quality matters more than
+the LLM quality in RAG systems. Better retrieval → better answers,
+regardless of which LLM you use.
+
+### Why temperature=0
+
+Temperature controls randomness in LLM output.
+temperature=0: deterministic — same input → same output every time.
+temperature=1: creative — different output every run.
+
+For Q&A you want deterministic answers:
+- Same question → same answer → easy to test
+- Consistent behavior → users trust the system
+- Easy to cache (same question = same cached answer)
+- Easier to debug (behavior is reproducible)
+
+### The system prompt design
+"Answer using ONLY the provided sources.
+If the answer is not in the sources, say 'I don't have enough information.'
+Cite sources like: According to [Source 1]..."
+
+Three constraints:
+1. ONLY the sources — prevents hallucination from training data
+2. Admit ignorance — prevents making up answers when context is missing
+3. Cite sources — makes answers verifiable, builds user trust
+
+This is called "grounding". The LLM is grounded to the retrieved context.
+Without grounding: LLM generates plausible-sounding but possibly wrong answers.
+With grounding: LLM can only use what you retrieved. Errors are traceable.
+
+### Why not just pass the whole document to the LLM
+
+1. Context window limits: Llama 3.1 has 8K token window.
+   A 100-page PDF is ~65K tokens. Doesn't fit.
+
+2. Cost: OpenAI charges per token. More tokens = more money.
+   5 relevant chunks (500 tokens) vs full document (50,000 tokens) = 100x cheaper.
+
+3. Quality: LLMs perform worse with very long contexts.
+   They tend to ignore information in the middle of long prompts.
+   Focused, relevant context → better answers.
+
+RAG solves all three problems simultaneously.
+
+---
+
+## Part 9 — Redis Caching
+
+### Why cache query results
+
+Every query involves:
+1. Embedding the question (CPU/model inference)
+2. Vector similarity search (database query)
+3. LLM API call (network + inference)
+
+Total latency: 1-3 seconds. Real cost per query (if using paid LLM).
+
+Many users ask the same questions:
+"What is the refund policy?" → asked by hundreds of users
+"What are the business hours?" → asked repeatedly
+
+Without cache: every request goes through the full pipeline.
+With cache: first request processes normally, stores result in Redis.
+All subsequent identical questions return in <10ms from cache.
+
+### The cache key design
+
+```python
+def make_cache_key(question: str, doc_id=None) -> str:
+    payload = json.dumps(
+        {'question': question.lower().strip(), 'doc_id': doc_id},
+        sort_keys=True
     )
-    return [item.embedding for item in response.data]
+    return f"rag:query:{hashlib.md5(payload.encode()).hexdigest()}"
 ```
 
-Pro: Better quality, especially for complex technical text
-Con: $0.02 per million tokens, requires API key, data leaves your server
+.lower().strip(): normalize the question so "What is RAG?" and
+"what is rag?" hit the same cache entry.
 
-#### Option B — Google embeddings
+sort_keys=True: ensures {"a":1,"b":2} and {"b":2,"a":1} produce the
+same JSON string and therefore the same hash.
 
-```python
-import google.generativeai as genai
+MD5: produces a 32-character hex string from any length input.
+Cache keys have a size limit — MD5 keeps them short.
+MD5 is not cryptographically secure but that doesn't matter here.
+We just need consistent short keys, not security.
 
-def embed_texts(texts):
-    result = genai.embed_content(
-        model="models/text-embedding-004",
-        content=texts,
-    )
-    return result['embedding']
-```
+f"rag:query:{hash}": namespace prefix prevents collisions with other
+Redis keys from other parts of the application.
 
-#### Option C — Ollama (local, larger models, GPU recommended)
-
-```python
-import ollama
-
-def embed_texts(texts):
-    return [
-        ollama.embeddings(model='nomic-embed-text', prompt=t)['embedding']
-        for t in texts
-    ]
-```
-
-Run completely locally with better quality than all-MiniLM-L6-v2.
-Requires more RAM (4-8GB) and is slower on CPU.
-
-### Different chunking strategies
-
-#### Option A — Token-based chunking (more accurate for LLM context limits)
-
-```python
-import tiktoken
-from langchain_text_splitters import TokenTextSplitter
-
-# Split by tokens not characters
-# LLM context windows are measured in tokens not characters
-# 512 chars ≠ 512 tokens (tokens are roughly 4 chars each)
-splitter = TokenTextSplitter(
-    chunk_size=256,      # 256 tokens ≈ ~1024 characters
-    chunk_overlap=32,
-    encoding_name="cl100k_base",  # same tokenizer as GPT-4
-)
-```
-
-Why this matters: if your LLM has a 4096 token context window and you
-pass 5 chunks of 512 characters each — you might be fine or you might
-overflow depending on how tokenization works. Token-based chunking
-gives you precise control.
-
-#### Option B — Semantic chunking (splits at meaning boundaries)
-
-```python
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_openai import OpenAIEmbeddings
-
-splitter = SemanticChunker(
-    OpenAIEmbeddings(),
-    breakpoint_threshold_type="percentile"
-)
-```
-
-Instead of splitting every 512 chars, this embeds every sentence,
-finds where the meaning "jumps" between sentences, and splits there.
-Result: each chunk is truly about one topic.
-More expensive (requires embedding every sentence upfront) but
-produces much higher quality chunks.
-
-#### Option C — Document structure aware (best for PDFs and docs)
-
-```python
-from langchain.document_loaders import PyPDFLoader
-from langchain_text_splitters import MarkdownHeaderTextSplitter
-
-# Split by markdown headers — keeps sections together
-headers_to_split_on = [
-    ("#", "Header 1"),
-    ("##", "Header 2"),
-    ("###", "Header 3"),
-]
-splitter = MarkdownHeaderTextSplitter(headers_to_split_on)
-```
-
-### Different vector stores
-
-#### Option A — Chroma (simplest, great for prototyping)
-
-```python
-import chromadb
-
-client = chromadb.Client()
-collection = client.create_collection("documents")
-collection.add(embeddings=embeddings, documents=texts, ids=ids)
-results = collection.query(query_embeddings=[question_embedding], n_results=5)
-```
-
-No PostgreSQL needed. Runs in memory or on disk. Zero setup.
-Not suitable for production at scale but perfect for learning.
-
-#### Option B — Pinecone (fully managed, production scale)
-
-```python
-import pinecone
-
-index = pinecone.Index("documents")
-index.upsert(vectors=[(id, embedding, metadata)])
-results = index.query(vector=question_embedding, top_k=5)
-```
-
-No infrastructure to manage. Scales to billions of vectors.
-Costs money but saves engineering time.
-
-#### Option C — FAISS (Meta's library, fastest on CPU/GPU)
-
-```python
-import faiss
-import numpy as np
-
-index = faiss.IndexFlatIP(384)  # inner product = cosine similarity
-index.add(np.array(embeddings))
-distances, indices = index.search(np.array([question_embedding]), k=5)
-```
-
-Fastest pure vector search library. Used internally at Meta.
-No persistence built-in — you manage saving/loading yourself.
+TTL=3600 (1 hour): cache expires after 1 hour.
+If the document is updated, stale cache expires naturally.
+For documents that never change, cache TTL could be much longer.
 
 ---
 
-## Part 5 — How Claude and ChatGPT Actually Work
+## Part 10 — File Parsing
 
-They do NOT just have one giant vector database. The reality is layered:
+### Why a dedicated parser module
+parser.py knows: how to read files
+pipeline.py knows: how to orchestrate ingestion
+chunker.py knows: how to split text
+embedder.py knows: how to generate vectors
 
-### Layer 1 — Training (what the model "knows")
+Each module has one job. This is the Single Responsibility Principle.
+Adding EPUB support = add _read_epub() to parser.py. Nothing else changes.
+Upgrading the chunking strategy = change chunker.py. Parser is untouched.
 
-The LLM itself was trained on trillions of tokens of text. This gives it
-general knowledge baked into its weights. This is not RAG — this is
-the model's "long term memory" from training.
+### PDF parsing with pdfplumber
 
-### Layer 2 — Context window (what the model can "see" right now)
+PDFs are not plain text files. They are a binary format that describes
+how to render text on a page — positions, fonts, coordinates.
+pdfplumber reads this binary format and extracts the text content.
 
-Claude has a 200K token context window. ChatGPT-4 has 128K.
-This is the "working memory" — everything in the current conversation
-plus any retrieved documents.
+The empty check:
+```python
+if not result.strip():
+    raise ValueError("No text found in PDF...")
+```
+Scanned PDFs are images disguised as PDFs. The scanner took a photo of
+a page and saved it as PDF. There is no text — just pixels.
+pdfplumber returns empty string. Without the check, you'd store a document
+with zero chunks and return "I don't have enough information" for every query.
+The explicit error tells the user to upload a text-based PDF or use OCR.
 
-### Layer 3 — Retrieval (RAG — exactly what you built)
+### Excel data_only=True
 
-For specific private data, recent information, or long documents —
-the system retrieves relevant chunks and puts them in the context window.
+```python
+wb = openpyxl.load_workbook(..., data_only=True)
+```
+Excel cells can contain formulas: =SUM(A1:A10) or values: 42.
+data_only=True returns the computed value (42) not the formula string.
+The LLM cannot interpret Excel formulas. It needs the actual values.
 
-Your project implements this layer.
+### The seek(0, 2) trick for file size
 
-### Layer 4 — Tools and function calling
-
-Claude and ChatGPT can call external APIs, run code, search the web.
-This is beyond RAG — the model decides when to call a tool and what
-to do with the result.
-
-### The full production pipeline at scale looks like
-User question
-│
-▼
-Query rewriting (LLM rewrites question for better retrieval)
-│
-▼
-Hybrid search (vector + keyword)
-│
-▼
-Reranker model (reorders results by relevance)
-│
-▼
-Context compression (LLM compresses chunks to fit context window)
-│
-▼
-LLM generates answer with citations
-│
-▼
-RAGAS evaluation (faithfulness, relevancy, recall scored automatically)
-
-You are building this entire pipeline over 18 weeks.
-This week you completed the first two boxes: document ingestion and
-vector storage. Each week adds one more box.
+```python
+file_field.seek(0, 2)    # seek to end of file
+file_size = file_field.tell()  # position = file size in bytes
+file_field.seek(0)       # seek back to beginning
+```
+seek(0, 2): the 2 means "seek relative to end". Position 0 from the end
+= the end of the file. tell() returns the current position = file size.
+Then seek(0) resets so we can read the file normally.
+This measures file size without reading the entire file into memory first.
+For a 500MB file, this saves significant memory.
 
 ---
 
-## Part 6 — Key Numbers to Remember
-all-MiniLM-L6-v2 dimensions:    384
-OpenAI ada-002 dimensions:      1536
-OpenAI text-3-large dimensions: 3072
-Your chunk size:                512 characters ≈ 128 tokens
-Your chunk overlap:             64 characters ≈ 16 tokens
-IVFFlat lists=100:              good for up to 100,000 chunks
-IVFFlat lists=1000:             good for up to 1,000,000 chunks
-Cosine similarity range:        -1.0 to 1.0
-Good retrieval threshold:       > 0.7 cosine similarity
+## Part 11 — Testing Strategy
+
+### Why mock embed_texts in tests
+
+```python
+@patch('documents.services.pipeline.embed_texts')
+def test_pipeline_creates_chunks(self, mock_embed):
+    mock_embed.return_value = [[0.0] * 384] * 10
+```
+
+The real embed_texts downloads a 90MB model and runs neural network inference.
+In tests you want: fast (milliseconds not minutes), no network, no GPU.
+mock_embed replaces the real function with one that returns fake vectors instantly.
+
+The test verifies the LOGIC (chunks are created, status is updated)
+without caring about the IMPLEMENTATION (actual embedding values).
+This is the right level of abstraction for unit tests.
+
+### Testing the failure path
+
+```python
+@patch('documents.services.pipeline.embed_texts')
+def test_failed_embed_rolls_back(self, mock_embed):
+    mock_embed.side_effect = Exception("Embedding service down")
+    ...
+    self.assertEqual(DocumentChunk.objects.count(), 0)
+```
+
+Testing failure paths is MORE important than testing happy paths.
+Happy paths work until they don't. Failure handling is what separates
+production systems from hobby projects.
+This test verifies transaction.atomic() actually works.
+Without this test, you might accidentally remove the atomic() wrapper
+and not notice until a production incident.
+
+### The testing pyramid for this project
+
+![testing_pyramid](images/rag_test.png)
+
+Your tests/test_pipeline.py covers unit tests.
+Unit tests are the foundation — fast, focused, catch logic errors early.
 
 ---
 
-## Part 7 — What to Explore Further
+## Part 12 — Production Considerations
 
-If you want to go deeper on any of these topics:
+### What's different in production vs development
 
-**Embeddings**
-- Read: "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks" (the paper behind all-MiniLM)
-- Try: Compare embeddings of similar vs different sentences using cosine similarity in the Django shell
+Development (what you have):
+manage.py runserver  ← single-threaded, not for concurrent users
+DEBUG=True           ← verbose error pages with stack traces
+.:/app volume mount  ← live code reload
+SQLite ok for tests  ← but you use PostgreSQL (good)
 
-**Chunking**
-- Experiment: Change chunk_size to 256 and 1024. Re-upload the same document. See how chunk quality changes.
-- Try: Token-based chunking with tiktoken
+Production (next steps):
+gunicorn --workers 3  ← multi-process, handles concurrent requests
+DEBUG=False           ← no stack traces exposed to users
+COPY . . in Dockerfile ← code baked into image, no volume mount
+HTTPS with SSL cert   ← encrypt all traffic
+ALLOWED_HOSTS set     ← only accept requests to your domain
 
-**pgvector**
-- Read: pgvector GitHub README — covers HNSW index (faster than IVFFlat for most cases)
-- Try: HNSW index instead of IVFFlat (Week 3 upgrade)
+### Why gunicorn not runserver
 
-**RAG quality**
-- Read: "RAGAS: Automated Evaluation of Retrieval Augmented Generation" paper
-- This is the evaluation framework you will implement in Week 6
+Django's runserver is single-threaded.
+User A makes request → server is busy → User B waits.
+One slow LLM call blocks everyone.
+
+Gunicorn spawns multiple worker processes:
+workers = (2 × CPU_cores) + 1
+Each worker handles one request independently.
+3 workers = 3 simultaneous requests, no blocking.
+
+### Environment variables vs hardcoded config
+
+Never hardcode:
+```python
+# BAD — hardcoded in code, committed to git
+DATABASES = {'default': {'PASSWORD': 'mysecretpassword'}}
+```
+
+Always use environment variables:
+```python
+# GOOD — read from environment
+DATABASES = {'default': {'PASSWORD': os.getenv('POSTGRES_PASSWORD')}}
+```
+
+WHY: credentials in git history are a permanent security risk.
+Even if you delete the file, git history preserves it.
+Environment variables are injected at runtime and never touch the codebase.
+
+### The .env.example pattern
+
+.env — real secrets, in .gitignore, never committed
+.env.example — fake values, committed to git
+.env:          POSTGRES_PASSWORD=my_actual_password_123
+.env.example:  POSTGRES_PASSWORD=your-db-password-here
+
+New developer clones repo → cp .env.example .env → fills in real values.
+Everyone knows what variables are needed without seeing the actual secrets.
 
 ---
 
-## Summary — What Week 1 Actually Means
+## Part 13 — What Production Systems Like Claude Actually Do
 
-You did not just "set up a Django project". You built:
+### Layer 1 — Training (permanent knowledge)
 
-1. A document ingestion system that scales to thousands of documents
-2. An async processing pipeline that handles chunking without blocking the API
-3. A vector storage system using the same core technology as production AI systems
-4. The foundation that every week of this curriculum builds on top of
+The LLM (Claude, GPT-4, Llama) was trained on trillions of tokens.
+This bakes in general knowledge about the world, coding, science, language.
+This is NOT RAG. This is the model's foundation.
 
-The concepts — embeddings, vector similarity, chunking strategy, approximate
-nearest neighbor search — these are the same concepts used inside every
-major AI company building RAG systems today.
+### Layer 2 — RAG (document-specific knowledge)
 
-Your implementation uses simpler/cheaper tools (all-MiniLM vs OpenAI,
-pgvector vs Pinecone) but the architecture is identical. Swapping the
-embedding model or vector store is a configuration change, not a
-redesign. That is good software architecture.
+For company-specific data, recent events, private documents —
+the system retrieves relevant chunks and adds them to the prompt.
+This is exactly what you built.
+
+### Layer 3 — Context window (conversation memory)
+
+Claude has a 200K token context window.
+Everything in the current conversation + retrieved docs fits here.
+This is "working memory" — temporary, per-conversation.
+
+### Layer 4 — Tools (dynamic information)
+
+Claude can call external APIs, run code, search the web.
+The model decides when a tool is needed and what to do with the result.
+This is beyond RAG — it's agentic behavior.
+
+### What your project implements vs production
+Your project:
+
+![production_features](images/rag_prod_comp.png)
+
+
+Production additions:
+○ Query rewriting (LLM rewrites question for better retrieval)
+○ Hybrid search (vector + BM25 keyword)
+○ Reranker model (CrossEncoder reorders retrieved chunks)
+○ Context compression (summarize chunks before LLM)
+○ RAGAS evaluation (automated quality scoring)
+○ Streaming responses (SSE for real-time output)
+○ Multi-tenancy (per-user document isolation)
+○ HNSW index (faster than IVFFlat)
+○ Monitoring (Prometheus + Grafana)
+○ Rate limiting
+○ Authentication (JWT tokens)
+
+The gap is real but smaller than it looks.
+Your architecture is identical. The additions are incremental improvements.
+A senior engineer could take your codebase and add these features.
+That is the mark of good foundational architecture.
+
+---
+
+## Part 14 — Key Numbers to Memorize
+EMBEDDINGS
+all-MiniLM-L6-v2 dimensions:     384
+OpenAI text-embedding-3-small:   1536
+OpenAI text-embedding-3-large:   3072
+Google text-embedding-004:        768
+CHUNKING
+Your chunk_size:                 512 characters ≈ 128 tokens
+Your chunk_overlap:              64 characters ≈ 16 tokens
+1 token ≈ 4 characters (rough average for English)
+PGVECTOR
+IVFFlat lists=100:               optimal up to 100K chunks
+IVFFlat lists=1000:              optimal up to 1M chunks
+Cosine distance range:           0.0 (identical) to 2.0 (opposite)
+Good retrieval threshold:        distance < 0.7
+LLM CONTEXT WINDOWS
+Llama 3.1 8B (Groq):             8K tokens
+GPT-4o:                          128K tokens
+Claude 3.5 Sonnet:               200K tokens
+Gemini 1.5 Pro:                  1M tokens
+GROQ FREE TIER
+llama-3.1-8b-instant:           14,400 requests/day
+Rate limit:                      30 requests/minute
+DOCKER
+web container port:              8000
+db container port:               5432
+redis container port:            6379
+
+---
+
+## Part 15 — Common Bugs You Hit and Why They Happened
+
+### "relation documents_document does not exist"
+
+Django's tables are created by migrations.
+docker compose up starts the server but does NOT run migrations.
+Django intentionally separates "start server" from "modify database".
+Fix: docker compose exec web python manage.py migrate
+
+### "type vector does not exist"
+
+pgvector extension was not installed in PostgreSQL.
+VectorExtension() in migrations creates it.
+If migrations ran before VectorExtension() was added — re-run from scratch.
+Fix: docker compose down -v → fix migration → docker compose up → migrate
+
+### "expected 768 dimensions, not 384"
+
+VectorField(dimensions=768) in models.py but embedding model outputs 384.
+The column and the model must match exactly.
+all-MiniLM-L6-v2 outputs 384, not 768.
+Fix: VectorField(dimensions=384) everywhere.
+
+### "No module named langchain.schema"
+
+LangChain moved classes between packages in version 0.1+.
+langchain.schema no longer exists.
+Fix: from langchain_core.messages import HumanMessage, SystemMessage
+
+### "model llama3-8b-8192 has been decommissioned"
+
+Groq deprecated this model.
+Fix: model='llama-3.1-8b-instant'
+
+### pip dependency conflicts
+
+langchain 0.2.0 requires langchain-core < 0.3.0
+langchain-google-genai 4.x requires langchain-core >= 1.2.0
+They cannot coexist.
+Fix: upgrade all langchain packages together. Let pip resolve versions.
+Then freeze: pip freeze > requirements.txt
+
+### "TimeoutError" during docker build
+
+ChromeOS Linux network can be slow/unstable inside containers.
+pip download times out mid-file.
+Fix: --timeout=120 --retries=5 in Dockerfile RUN pip install command.
+
+---
+
+## Summary — The Architecture That Scales
+
+You built a system where every component can be swapped independently:
+Want better embeddings?
+Change embedder.py to use OpenAI or Cohere.
+Nothing else changes.
+Want to support more file types?
+Add a function to parser.py.
+Nothing else changes.
+Want to use a different LLM?
+Change llm.py.
+Nothing else changes.
+Want to scale to 10M vectors?
+Switch from IVFFlat to HNSW index.
+Change one SQL statement in the migration.
+Nothing else changes.
+Want to deploy to AWS instead of Railway?
+Change docker-compose.yml for production.
+Application code stays identical.
+
+This is what good architecture means.
+Not the fanciest technology. Not the most complex code.
+Code where each component has one job and can evolve independently.
+
+The RAG concepts you now understand — embeddings, vector similarity,
+chunking, retrieval, grounding — are the same concepts used by every
+AI engineer at Anthropic, OpenAI, Google, and every startup building
+on top of LLMs today.
+
+You built it from scratch. That matters.
