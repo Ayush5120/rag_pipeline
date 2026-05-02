@@ -24,7 +24,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     embeddings = model.encode(
         texts,
         batch_size=32,
-        # Process 32 chunks at a time. Efficient GPU/CPU utilization.
         # Don't set too high — memory issues on low-RAM machines.
         show_progress_bar=False,
         convert_to_numpy=True,
