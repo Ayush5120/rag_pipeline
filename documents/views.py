@@ -8,6 +8,7 @@ from .services.search import search_chunks
 import time
 from rest_framework.views import APIView
 from rest_framework import status
+from .services.cache import set_cached_answer, get_cached_answer
 
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all().order_by('-created_at')
@@ -95,6 +96,13 @@ class QueryView(APIView):
                 {'error': 'question is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        # Check cache first
+        cached = get_cached_answer(question, doc_id)
+        if cached:
+            return Response({
+                **cached,
+                'cached': True,
+            })
 
         start_time = time.time()
 
@@ -113,9 +121,14 @@ class QueryView(APIView):
             retrieved_chunk_ids=[c.id for c in chunks],
             latency_ms=latency_ms,
         )
+        response_data = {
+        'answer': result['answer'],
+        'sources': result['sources'],
+        'latency_ms': latency_ms,
+        'cached': False,
+        }
 
-        return Response({
-            'answer': result['answer'],
-            'sources': result['sources'],
-            'latency_ms': latency_ms,
-        })
+        # Cache the result for next time
+        set_cached_answer(question,response_data, doc_id)
+
+        return Response(response_data)

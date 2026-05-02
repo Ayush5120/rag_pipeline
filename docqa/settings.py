@@ -167,3 +167,9 @@ REST_FRAMEWORK = {
 }
 # List endpoints return 10 items per page instead of dumping
 # the entire table. Week 2 queries could return thousands of chunks.
+
+# Production security settings
+# These are safe to add now — they only activate when DEBUG=False
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF = True
