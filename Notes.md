@@ -4,7 +4,7 @@
 
 ---
 
-## 📋 Table of Contents
+<!-- ## 📋 Table of Contents
 
 1. [What You Built](#-what-you-built)
 2. [Project Structure](#-project-structure)
@@ -22,7 +22,7 @@
 14. [What Production AI Systems Actually Do](#-what-production-ai-systems-actually-do)
 15. [Key Numbers to Memorize](#-key-numbers-to-memorize)
 16. [Common Bugs and Fixes](#-common-bugs-and-fixes)
-17. [Architecture Summary](#-architecture-summary)
+17. [Architecture Summary](#-architecture-summary) -->
 
 ---
 
