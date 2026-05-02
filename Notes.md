@@ -1,3 +1,33 @@
+# 🧠 RAG Pipeline — Complete Engineering Notes
+
+> A deep-dive reference covering every concept, decision, and lesson from building a production-grade Retrieval Augmented Generation system from scratch.
+
+---
+
+## 📋 Table of Contents
+
+1. [What You Built](#what-you-built)
+2. [Project Structure](#project-structure)
+3. [Docker and Containerization](#docker-and-containerization)
+4. [Django Architecture](#django-architecture)
+5. [Async Processing with Celery](#async-processing-with-celery)
+6. [Chunking In Depth](#chunking-in-depth)
+7. [Embeddings In Depth](#embeddings-in-depth)
+8. [pgvector and Vector Search](#pgvector-and-vector-search)
+9. [LLM Integration](#llm-integration)
+10. [Redis Caching](#redis-caching)
+11. [File Parsing](#file-parsing)
+12. [Testing Strategy](#testing-strategy)
+13. [Production Considerations](#production-considerations)
+14. [What Production AI Systems Actually Do](#what-production-ai-systems-actually-do)
+15. [Key Numbers to Memorize](#key-numbers-to-memorize)
+16. [Common Bugs and Fixes](#common-bugs-and-fixes)
+17. [Architecture Summary](#architecture-summary)
+
+---
+
+## 🏗 What You Built
+
 You built a production-grade Document Q&A system from scratch.
 A user uploads any document. The system reads it, breaks it into pieces,
 converts each piece into numbers that capture meaning, and stores everything
