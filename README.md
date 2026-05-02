@@ -4,7 +4,7 @@
 
 # 🔍 Document Q&A System
 
-### A production-grade RAG pipeline — upload any document, ask any question.
+### A production-grade RAG pipeline — upload any document, ask any question (For complete engineering notes, ref [Notes](Notes.md)).
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Django](https://img.shields.io/badge/Django-4.2-092E20?style=for-the-badge&logo=django&logoColor=white)
@@ -325,13 +325,13 @@ docker compose restart celery       # restart celery worker
 - [x] Document ingestion pipeline
 - [x] Async chunking and embedding via Celery
 - [x] pgvector storage with IVFFlat index
-- [ ] Vector similarity search endpoint
+- [x] Vector similarity search endpoint
 - [ ] Hybrid search (vector + BM25 keyword)
 - [ ] LLM answer generation
-- [ ] Redis semantic query caching
+- [x] Redis semantic query caching
 - [ ] RAGAS evaluation suite
-- [ ] PDF and DOCX parsing
-- [ ] Production deployment with Gunicorn + Nginx
+- [x] PDF, DOC, PPT, CSV parsing supports
+- [x] Production deployment with Gunicorn + Nginx
 
 ---
 
