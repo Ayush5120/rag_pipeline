@@ -4,8 +4,8 @@
 
 # 🔍 Document Q&A System
 
-### A production-grade RAG pipeline — upload any document, ask any question 
-(For complete engineering notes, ref [Notes](Notes.md)).
+### A production-grade RAG pipeline — upload any document, ask any question
+(For complete engineering notes, ref [Notes](Notes.md))
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Django](https://img.shields.io/badge/Django-4.2-092E20?style=for-the-badge&logo=django&logoColor=white)
@@ -16,11 +16,11 @@
 
 <br/>
 
-> Upload a PDF, TXT, or DOCX → ask a natural language question → get a precise, context-aware answer powered by vector search and an LLM.
+> Upload a PDF, TXT, DOCX, CSV, or PPTX → ask a natural language question → get a precise, context-aware answer powered by vector search and an LLM.
 
 <br/>
 
-[Features](#-features) · [Quick Start](#-quick-start) · [API](#-api-reference) · [Commands](#-useful-commands)
+[Features](#-features) · [Quick Start](#-quick-start) · [API](#-api-reference) · [Useful Commands](#-useful-commands) · [Roadmap](#-roadmap)
 
 </div>
 
@@ -28,86 +28,17 @@
 
 ## ✨ Features
 
-- 📄 **Document ingestion** — upload TXT, PDF, DOCX files via REST API
+- 📄 **Multi-format ingestion** — upload TXT, PDF, DOCX, CSV, PPTX files via REST API
 - ✂️ **Smart chunking** — LangChain `RecursiveCharacterTextSplitter` preserves sentence and paragraph boundaries
 - 🧠 **Semantic embeddings** — HuggingFace `all-MiniLM-L6-v2` converts text to 384-dim vectors locally, no API key needed
 - ⚡ **Async processing** — Celery + Redis handles chunking and embedding in the background, API returns instantly
 - 🔎 **Vector similarity search** — pgvector IVFFlat index for fast approximate nearest-neighbor retrieval
-- 📊 **Query logging** — every question, answer, latency, and RAGAS score stored for evaluation
+- 🗄️ **Semantic query caching** — Redis caches results to avoid redundant LLM calls, returns in <10ms on cache hit
+- 📊 **Query logging** — every question, answer, latency, and retrieval metadata stored for evaluation
+- 🚀 **Production-ready serving** — Gunicorn + Nginx for multi-process concurrent request handling
 - 🐳 **Fully containerized** — one command to spin up the entire stack
 
 ---
-
-<!-- ## 🏗 Architecture
-┌─────────────────────────────────────────────────────────────────┐
-│                        INGESTION PIPELINE                        │
-│                                                                   │
-│  POST /api/documents/                                             │
-│         │                                                         │
-│         ▼                                                         │
-│  Django saves file ──► Celery Task ──► LangChain Chunker         │
-│                                               │                   │
-│                                               ▼                   │
-│                                      HuggingFace Embedder        │
-│                                               │                   │
-│                                               ▼                   │
-│                                    pgvector (PostgreSQL)          │
-└─────────────────────────────────────────────────────────────────┘
-┌─────────────────────────────────────────────────────────────────┐
-│                         QUERY PIPELINE                           │
-│                                                                   │
-│  POST /api/query/                                                 │
-│         │                                                         │
-│         ▼                                                         │
-│  Embed Question ──► pgvector Search ──► Top-K Chunks ──► LLM    │
-│                                                           │       │
-│                                                           ▼       │
-│                                                       Answer      │
-└─────────────────────────────────────────────────────────────────┘
-
-### Docker Services
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│     web      │────▶│      db      │     │    redis     │
-│   Django     │     │  PostgreSQL  │     │   broker     │
-│   :8000      │     │  + pgvector  │     │   :6379      │
-└──────────────┘     └──────────────┘     └──────────────┘
-│                    ▲                    ▲
-│                    │                    │
-▼                    │                    │
-┌──────────────┐             │                    │
-│    celery    │─────────────┴────────────────────┘
-│    worker    │
-└──────────────┘
-
----
-
-## 📁 Project Structure
-rag_pipeline/
-├── 🐳 Dockerfile
-├── 🐳 docker-compose.yml
-├── 📦 requirements.txt
-├── ⚙️  manage.py
-├── 🔒 .env.example
-│
-├── docqa/                          # Django project config
-│   ├── settings.py                 # all configuration
-│   ├── urls.py                     # root URL routing
-│   ├── celery.py                   # async task queue setup
-│   └── wsgi.py
-│
-└── documents/                      # core app
-├── models.py                   # Document, DocumentChunk, QueryLog
-├── serializers.py              # DRF serializers
-├── views.py                    # API ViewSets
-├── urls.py                     # app URL routing
-├── tasks.py                    # Celery async tasks
-├── admin.py                    # Django admin config
-├── migrations/
-│   └── 0001_initial.py         # pgvector + table setup
-└── services/
-├── chunker.py              # LangChain text splitter
-├── embedder.py             # HuggingFace embeddings
-└── pipeline.py            # orchestrates chunk→embed→store -->
 
 ## 🚀 Quick Start
 
@@ -143,9 +74,9 @@ POSTGRES_PASSWORD=your-db-password
 REDIS_URL=redis://redis:6379/0
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
-GEMINI_API_KEY=your-api-key
 
-GROQ_API_KEY=your-api-key
+GROQ_API_KEY=your-groq-api-key
+GEMINI_API_KEY=your-gemini-api-key
 ```
 
 ### 3. Create media directory
@@ -181,305 +112,305 @@ curl http://localhost:8000/api/documents/
 
 ---
 
-## Part 10 — File Parsing
+## 📡 API Reference
 
-### Why a dedicated parser module
-parser.py knows: how to read files
-pipeline.py knows: how to orchestrate ingestion
-chunker.py knows: how to split text
-embedder.py knows: how to generate vectors
+### Upload a Document
 
-Each module has one job. This is the Single Responsibility Principle.
-Adding EPUB support = add _read_epub() to parser.py. Nothing else changes.
-Upgrading the chunking strategy = change chunker.py. Parser is untouched.
-
-### PDF parsing with pdfplumber
-
-PDFs are not plain text files. They are a binary format that describes
-how to render text on a page — positions, fonts, coordinates.
-pdfplumber reads this binary format and extracts the text content.
-
-The empty check:
-```python
-if not result.strip():
-    raise ValueError("No text found in PDF...")
+```bash
+curl -X POST http://localhost:8000/api/documents/ \
+  -F "title=My Document" \
+  -F "file=@/path/to/file.pdf"
 ```
-Scanned PDFs are images disguised as PDFs. The scanner took a photo of
-a page and saved it as PDF. There is no text — just pixels.
-pdfplumber returns empty string. Without the check, you'd store a document
-with zero chunks and return "I don't have enough information" for every query.
-The explicit error tells the user to upload a text-based PDF or use OCR.
 
-### Excel data_only=True
-
-```python
-wb = openpyxl.load_workbook(..., data_only=True)
+**Response:**
+```json
+{
+  "id": 1,
+  "title": "My Document",
+  "status": "pending",
+  "chunk_count": 0,
+  "created_at": "2024-01-01T00:00:00Z"
+}
 ```
-Excel cells can contain formulas: =SUM(A1:A10) or values: 42.
-data_only=True returns the computed value (42) not the formula string.
-The LLM cannot interpret Excel formulas. It needs the actual values.
 
-### The seek(0, 2) trick for file size
+### Check Document Status
 
-```python
-file_field.seek(0, 2)    # seek to end of file
-file_size = file_field.tell()  # position = file size in bytes
-file_field.seek(0)       # seek back to beginning
+```bash
+curl http://localhost:8000/api/documents/1/
 ```
-seek(0, 2): the 2 means "seek relative to end". Position 0 from the end
-= the end of the file. tell() returns the current position = file size.
-Then seek(0) resets so we can read the file normally.
-This measures file size without reading the entire file into memory first.
-For a 500MB file, this saves significant memory.
+
+**Response:**
+```json
+{
+  "id": 1,
+  "title": "My Document",
+  "status": "done",
+  "chunk_count": 42,
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+Status values: `pending` → `processing` → `done` | `failed`
+
+### Query a Document
+
+```bash
+curl -X POST http://localhost:8000/api/query/ \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the refund policy?", "document_id": 1}'
+```
+
+**Response:**
+```json
+{
+  "answer": "According to [Source 1], the refund policy allows returns within 30 days...",
+  "sources": [
+    { "chunk_index": 3, "content": "Refunds are accepted within 30 days...", "distance": 0.21 }
+  ],
+  "latency_ms": 1340,
+  "cached": false
+}
+```
+
+### List All Documents
+
+```bash
+curl http://localhost:8000/api/documents/
+```
+
+### Delete a Document
+
+```bash
+curl -X DELETE http://localhost:8000/api/documents/1/
+```
+
+### Admin Panel
+
+```
+http://localhost:8000/admin/
+```
 
 ---
 
-## Part 11 — Testing Strategy
+## 🛠 Useful Commands
 
-### Why mock embed_texts in tests
+### Stack Management
 
-```python
-@patch('documents.services.pipeline.embed_texts')
-def test_pipeline_creates_chunks(self, mock_embed):
-    mock_embed.return_value = [[0.0] * 384] * 10
+```bash
+# Start all services in background
+docker compose up -d
+
+# Start and rebuild images (after code/dependency changes)
+docker compose up --build -d
+
+# Stop all services
+docker compose down
+
+# Stop and delete all volumes (wipe database completely)
+docker compose down -v
+
+# View status of all containers
+docker compose ps
+
+# Restart a single service
+docker compose restart web
+docker compose restart celery
 ```
 
-The real embed_texts downloads a 90MB model and runs neural network inference.
-In tests you want: fast (milliseconds not minutes), no network, no GPU.
-mock_embed replaces the real function with one that returns fake vectors instantly.
+### Logs
 
-The test verifies the LOGIC (chunks are created, status is updated)
-without caring about the IMPLEMENTATION (actual embedding values).
-This is the right level of abstraction for unit tests.
+```bash
+# Stream logs from all services
+docker compose logs -f
 
-### Testing the failure path
+# Logs from a specific service
+docker compose logs -f web
+docker compose logs -f celery
+docker compose logs -f db
 
-```python
-@patch('documents.services.pipeline.embed_texts')
-def test_failed_embed_rolls_back(self, mock_embed):
-    mock_embed.side_effect = Exception("Embedding service down")
-    ...
-    self.assertEqual(DocumentChunk.objects.count(), 0)
+# Last 100 lines from celery
+docker compose logs --tail=100 celery
 ```
 
-Testing failure paths is MORE important than testing happy paths.
-Happy paths work until they don't. Failure handling is what separates
-production systems from hobby projects.
-This test verifies transaction.atomic() actually works.
-Without this test, you might accidentally remove the atomic() wrapper
-and not notice until a production incident.
+### Django
 
-### The testing pyramid for this project
+```bash
+# Run migrations
+docker compose exec web python manage.py migrate
 
-![testing_pyramid](images/rag_test.png)
+# Create a new migration after model changes
+docker compose exec web python manage.py makemigrations
 
-Your tests/test_pipeline.py covers unit tests.
-Unit tests are the foundation — fast, focused, catch logic errors early.
+# Show migration status
+docker compose exec web python manage.py showmigrations
+
+# Create superuser
+docker compose exec web python manage.py createsuperuser
+
+# Open Django shell
+docker compose exec web python manage.py shell
+
+# Collect static files
+docker compose exec web python manage.py collectstatic --noinput
+```
+
+### Database
+
+```bash
+# Open PostgreSQL shell
+docker compose exec db psql -U your-db-user -d docqa_db
+
+# Count total chunks stored
+docker compose exec db psql -U your-db-user -d docqa_db \
+  -c "SELECT COUNT(*) FROM documents_documentchunk;"
+
+# Check pgvector extension is installed
+docker compose exec db psql -U your-db-user -d docqa_db \
+  -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
+
+# Wipe all documents and chunks (keep tables)
+docker compose exec db psql -U your-db-user -d docqa_db \
+  -c "TRUNCATE documents_document, documents_documentchunk, documents_querylog CASCADE;"
+```
+
+### Celery
+
+```bash
+# Check active Celery workers
+docker compose exec celery celery -A docqa inspect active
+
+# Check queued/reserved tasks
+docker compose exec celery celery -A docqa inspect reserved
+
+# Purge all pending tasks from queue
+docker compose exec celery celery -A docqa purge
+
+# Manually trigger document reprocessing (from Django shell)
+docker compose exec web python manage.py shell
+>>> from documents.tasks import process_document_task
+>>> process_document_task.delay(document_id=1)
+```
+
+### Redis
+
+```bash
+# Open Redis CLI
+docker compose exec redis redis-cli
+
+# List all cached query keys
+docker compose exec redis redis-cli KEYS "rag:query:*"
+
+# Count cached queries
+docker compose exec redis redis-cli KEYS "rag:query:*" | wc -l
+
+# Flush only cached RAG queries
+docker compose exec redis redis-cli KEYS "rag:query:*" | \
+  xargs docker compose exec -T redis redis-cli DEL
+
+# Flush entire Redis cache
+docker compose exec redis redis-cli FLUSHALL
+```
+
+### Testing
+
+```bash
+# Run all tests
+docker compose exec web python manage.py test
+
+# Run a specific test file
+docker compose exec web python manage.py test documents.tests.test_pipeline
+
+# Run a specific test case
+docker compose exec web python manage.py test documents.tests.test_pipeline.PipelineTestCase
+
+# Run with verbosity
+docker compose exec web python manage.py test --verbosity=2
+```
 
 ---
 
-## Part 12 — Production Considerations
+## 📁 Project Structure
 
-### What's different in production vs development
-
-Development (what you have):
-manage.py runserver  ← single-threaded, not for concurrent users
-DEBUG=True           ← verbose error pages with stack traces
-.:/app volume mount  ← live code reload
-SQLite ok for tests  ← but you use PostgreSQL (good)
-
-Production (next steps):
-gunicorn --workers 3  ← multi-process, handles concurrent requests
-DEBUG=False           ← no stack traces exposed to users
-COPY . . in Dockerfile ← code baked into image, no volume mount
-HTTPS with SSL cert   ← encrypt all traffic
-ALLOWED_HOSTS set     ← only accept requests to your domain
-
-### Why gunicorn not runserver
-
-Django's runserver is single-threaded.
-User A makes request → server is busy → User B waits.
-One slow LLM call blocks everyone.
-
-Gunicorn spawns multiple worker processes:
-workers = (2 × CPU_cores) + 1
-Each worker handles one request independently.
-3 workers = 3 simultaneous requests, no blocking.
-
-### Environment variables vs hardcoded config
-
-Never hardcode:
-```python
-# BAD — hardcoded in code, committed to git
-DATABASES = {'default': {'PASSWORD': 'mysecretpassword'}}
+```
+rag_pipeline/
+├── 🐳 Dockerfile
+├── 🐳 docker-compose.yml
+├── 📦 requirements.txt
+├── ⚙️  manage.py
+├── 🔒 .env.example
+│
+├── docqa/                          # Django project config
+│   ├── settings.py                 # all configuration
+│   ├── urls.py                     # root URL routing
+│   ├── celery.py                   # async task queue setup
+│   └── wsgi.py
+│
+└── documents/                      # core app
+    ├── models.py                   # Document, DocumentChunk, QueryLog
+    ├── serializers.py              # DRF serializers
+    ├── views.py                    # API ViewSets
+    ├── urls.py                     # app URL routing
+    ├── tasks.py                    # Celery async tasks
+    ├── admin.py                    # Django admin config
+    ├── migrations/
+    │   └── 0001_initial.py         # pgvector + table setup
+    └── services/
+        ├── parser.py               # file reading (PDF, DOCX, CSV, PPTX)
+        ├── chunker.py              # LangChain text splitter
+        ├── embedder.py             # HuggingFace embeddings
+        ├── llm.py                  # Groq/Gemini LLM calls
+        ├── cache.py                # Redis query caching
+        └── pipeline.py             # orchestrates parse→chunk→embed→store
 ```
 
-Always use environment variables:
-```python
-# GOOD — read from environment
-DATABASES = {'default': {'PASSWORD': os.getenv('POSTGRES_PASSWORD')}}
-```
-
-WHY: credentials in git history are a permanent security risk.
-Even if you delete the file, git history preserves it.
-Environment variables are injected at runtime and never touch the codebase.
-
-### The .env.example pattern
-
-.env — real secrets, in .gitignore, never committed
-.env.example — fake values, committed to git
-.env:          POSTGRES_PASSWORD=my_actual_password_123
-.env.example:  POSTGRES_PASSWORD=your-db-password-here
-
-New developer clones repo → cp .env.example .env → fills in real values.
-Everyone knows what variables are needed without seeing the actual secrets.
-
 ---
 
-## Part 13 — What Production Systems Like Claude Actually Do
+## 🔑 Key Numbers
 
-### Layer 1 — Training (permanent knowledge)
-
-The LLM (Claude, GPT-4, Llama) was trained on trillions of tokens.
-This bakes in general knowledge about the world, coding, science, language.
-This is NOT RAG. This is the model's foundation.
-
-### Layer 2 — RAG (document-specific knowledge)
-
-For company-specific data, recent events, private documents —
-the system retrieves relevant chunks and adds them to the prompt.
-This is exactly what you built.
-
-### Layer 3 — Context window (conversation memory)
-
-Claude has a 200K token context window.
-Everything in the current conversation + retrieved docs fits here.
-This is "working memory" — temporary, per-conversation.
-
-### Layer 4 — Tools (dynamic information)
-
-Claude can call external APIs, run code, search the web.
-The model decides when a tool is needed and what to do with the result.
-This is beyond RAG — it's agentic behavior.
-
-### What your project implements vs production
-Your project:
-
-![production_features](images/rag_prod_comp.png)
-
-
-Production additions:
-○ Query rewriting (LLM rewrites question for better retrieval)
-○ Hybrid search (vector + BM25 keyword)
-○ Reranker model (CrossEncoder reorders retrieved chunks)
-○ Context compression (summarize chunks before LLM)
-○ RAGAS evaluation (automated quality scoring)
-○ Streaming responses (SSE for real-time output)
-○ Multi-tenancy (per-user document isolation)
-○ HNSW index (faster than IVFFlat)
-○ Monitoring (Prometheus + Grafana)
-○ Rate limiting
-○ Authentication (JWT tokens)
-
-The gap is real but smaller than it looks.
-Your architecture is identical. The additions are incremental improvements.
-A senior engineer could take your codebase and add these features.
-That is the mark of good foundational architecture.
-
----
-
-## Part 14 — Key Numbers to Memorize
-EMBEDDINGS
-all-MiniLM-L6-v2 dimensions:     384
-OpenAI text-embedding-3-small:   1536
-OpenAI text-embedding-3-large:   3072
-Google text-embedding-004:        768
-CHUNKING
-Your chunk_size:                 512 characters ≈ 128 tokens
-Your chunk_overlap:              64 characters ≈ 16 tokens
-1 token ≈ 4 characters (rough average for English)
-PGVECTOR
-IVFFlat lists=100:               optimal up to 100K chunks
-IVFFlat lists=1000:              optimal up to 1M chunks
-Cosine distance range:           0.0 (identical) to 2.0 (opposite)
-Good retrieval threshold:        distance < 0.7
-LLM CONTEXT WINDOWS
-Llama 3.1 8B (Groq):             8K tokens
-GPT-4o:                          128K tokens
-Claude 3.5 Sonnet:               200K tokens
-Gemini 1.5 Pro:                  1M tokens
-GROQ FREE TIER
-llama-3.1-8b-instant:           14,400 requests/day
-Rate limit:                      30 requests/minute
-DOCKER
-web container port:              8000
-db container port:               5432
-redis container port:            6379
-
----
-
-## Part 15 — Common Bugs You Hit and Why They Happened
-
-### "relation documents_document does not exist"
-
-Django's tables are created by migrations.
-docker compose up starts the server but does NOT run migrations.
-Django intentionally separates "start server" from "modify database".
-Fix: docker compose exec web python manage.py migrate
-
-### "type vector does not exist"
-
-pgvector extension was not installed in PostgreSQL.
-VectorExtension() in migrations creates it.
-If migrations ran before VectorExtension() was added — re-run from scratch.
-Fix: docker compose down -v → fix migration → docker compose up → migrate
-
-### "expected 768 dimensions, not 384"
-
-VectorField(dimensions=768) in models.py but embedding model outputs 384.
-The column and the model must match exactly.
-all-MiniLM-L6-v2 outputs 384, not 768.
-Fix: VectorField(dimensions=384) everywhere.
-
-### "No module named langchain.schema"
-
-LangChain moved classes between packages in version 0.1+.
-langchain.schema no longer exists.
-Fix: from langchain_core.messages import HumanMessage, SystemMessage
-
-### "model llama3-8b-8192 has been decommissioned"
-
-Groq deprecated this model.
-Fix: model='llama-3.1-8b-instant'
-
-### pip dependency conflicts
-
-langchain 0.2.0 requires langchain-core < 0.3.0
-langchain-google-genai 4.x requires langchain-core >= 1.2.0
-They cannot coexist.
-Fix: upgrade all langchain packages together. Let pip resolve versions.
-Then freeze: pip freeze > requirements.txt
-
-### "TimeoutError" during docker build
-
-ChromeOS Linux network can be slow/unstable inside containers.
-pip download times out mid-file.
-Fix: --timeout=120 --retries=5 in Dockerfile RUN pip install command.
+| Parameter | Value |
+|---|---|
+| Embedding model | `all-MiniLM-L6-v2` |
+| Embedding dimensions | 384 |
+| Chunk size | 512 characters (~128 tokens) |
+| Chunk overlap | 64 characters (~16 tokens) |
+| Cosine distance threshold | < 0.7 |
+| Top-K retrieval | 5 chunks |
+| IVFFlat lists | 100 (optimal up to 100K chunks) |
+| Groq free tier | 14,400 req/day, 30 req/min |
+| LLM temperature | 0 (deterministic) |
+| Cache TTL | 3600s (1 hour) |
 
 ---
 
 ## 🔮 Roadmap
 
 - [x] Document ingestion pipeline
+- [x] Multi-format parsing — PDF, DOCX, TXT, CSV, PPTX
 - [x] Async chunking and embedding via Celery
 - [x] pgvector storage with IVFFlat index
 - [x] Vector similarity search endpoint
-- [ ] Hybrid search (vector + BM25 keyword)
-- [ ] LLM answer generation
+- [x] LLM answer generation (Groq / Gemini)
 - [x] Redis semantic query caching
-- [ ] RAGAS evaluation suite
-- [x] PDF, DOC, PPT, CSV parsing supports
+- [x] Query logging with latency tracking
 - [x] Production deployment with Gunicorn + Nginx
+- [ ] Hybrid search (vector + BM25 keyword)
+- [ ] RAGAS evaluation suite
+- [ ] Query rewriting for better retrieval
+- [ ] Streaming responses (SSE)
+- [ ] JWT authentication + multi-tenancy
+- [ ] HNSW index (faster than IVFFlat at scale)
+- [ ] Monitoring with Prometheus + Grafana
 
 ---
 
+## 🐛 Common Issues
+
+| Error | Cause | Fix |
+|---|---|---|
+| `relation does not exist` | Migrations not run | `docker compose exec web python manage.py migrate` |
+| `type vector does not exist` | pgvector extension missing | `docker compose down -v` → fix migration → restart |
+| `expected 768 dimensions, not 384` | Model/field mismatch | Set `VectorField(dimensions=384)` everywhere |
+| `No module named langchain.schema` | LangChain breaking change | `from langchain_core.messages import ...` |
+| `model llama3-8b-8192 decommissioned` | Groq deprecated model | Use `llama-3.1-8b-instant` |
+| `TimeoutError` during build | Slow network in container | Add `--timeout=120 --retries=5` to pip install in Dockerfile |
+| `Not possible to fast-forward` | Diverged git branches | `git pull --rebase origin main` |
